@@ -16,7 +16,7 @@ class CompanySearcher(BaseCollector):
         return [self.search_company_by_name(query)] if self.search_company_by_name(query) else []
     
     def search_company_by_name(self, company_name: str) -> Optional[Dict]:
-        """Ищет компанию по названию на rusprofile.ru"""
+        """Ищет компанию по названию на rusprofile.ru с использованием регулярных выражений"""
         # Очищаем название от лишних символов
         clean_name = company_name.strip()
         if not clean_name:
@@ -30,26 +30,57 @@ class CompanySearcher(BaseCollector):
             return None
         
         try:
-            # Ищем ссылки на компании в результатах поиска
-            company_links = soup.find_all('a', href=True)
+            # Получаем весь HTML как текст для поиска с помощью регулярных выражений
+            html_text = str(soup)
             name_lower = clean_name.lower()
+            name_words = [w for w in name_lower.split() if len(w) > 2]
             
-            for link in company_links[:20]:  # Ограничиваем количество проверок
+            # Ищем ИНН в результатах поиска с помощью регулярных выражений
+            # Паттерн для поиска ссылок с ИНН: /inn/XXXXXXXXXX или /id/XXXXX
+            # Более точный паттерн - ищем ссылки вида href="/inn/XXXXXXXXXX"
+            inn_pattern = r'href=["\']?/inn/(\d{10,12})["\']?'
+            inn_matches = re.finditer(inn_pattern, html_text, re.IGNORECASE)
+            
+            found_inns = set()  # Чтобы не проверять один ИНН дважды
+            
+            for match in inn_matches:
+                inn = match.group(1)
+                # Проверяем валидность ИНН (10 или 12 цифр)
+                if len(inn) not in [10, 12] or inn in found_inns:
+                    continue
+                
+                found_inns.add(inn)
+                
+                # Ищем контекст вокруг ИНН (название компании должно быть рядом)
+                start_pos = max(0, match.start() - 500)
+                end_pos = min(len(html_text), match.end() + 500)
+                context = html_text[start_pos:end_pos].lower()
+                
+                # Проверяем, есть ли название компании в контексте
+                if (name_lower in context or 
+                    (len(name_words) > 0 and sum(1 for w in name_words if w in context) >= len(name_words) * 0.5)):
+                    # Пробуем получить данные по ИНН
+                    inn_url = f"{self.BASE_URL}/inn/{inn}"
+                    company_data = self.get_company_data(inn_url)
+                    if company_data:
+                        company_name_lower = company_data.get('name', '').lower()
+                        if (name_lower in company_name_lower or 
+                            len(name_words) > 0 and sum(1 for w in name_words if w in company_name_lower) >= len(name_words) * 0.5):
+                            return company_data
+            
+            # Также пробуем найти через ссылки (старый метод как запасной)
+            company_links = soup.find_all('a', href=True)
+            for link in company_links[:30]:  # Увеличиваем количество проверок
                 href = link.get('href', '')
                 text = link.get_text(strip=True)
                 
-                # Проверяем, что это ссылка на компанию
                 if '/id/' in href or '/inn/' in href:
                     text_lower = text.lower()
-                    
-                    # Проверяем совпадение названия (более гибкая проверка)
-                    name_words = [w for w in name_lower.split() if len(w) > 2]
                     if (name_lower in text_lower or 
                         len(name_words) > 0 and sum(1 for w in name_words if w in text_lower) >= len(name_words) * 0.5):
                         company_url = href if href.startswith('http') else self.BASE_URL + href
                         company_data = self.get_company_data(company_url)
                         if company_data:
-                            # Проверяем, что название действительно похоже
                             company_name_lower = company_data.get('name', '').lower()
                             if (name_lower in company_name_lower or 
                                 len(name_words) > 0 and sum(1 for w in name_words if w in company_name_lower) >= len(name_words) * 0.5):
@@ -61,69 +92,133 @@ class CompanySearcher(BaseCollector):
         return None
     
     def get_company_data(self, company_url: str) -> Optional[Dict]:
-        """Получение данных о компании с rusprofile.ru"""
+        """Получение данных о компании с rusprofile.ru с использованием регулярных выражений"""
         soup = self.fetch_page(company_url)
         if not soup:
             return None
         
         try:
-            # Извлечение ИНН
+            # Получаем HTML как текст для поиска с помощью регулярных выражений
+            html_text = str(soup)
+            page_text = soup.get_text()
+            
+            # Извлечение ИНН с помощью регулярных выражений
             inn = None
             # Пробуем найти ИНН в URL
             if '/inn/' in company_url:
-                inn_match = company_url.split('/inn/')[-1].split('/')[0]
-                inn = normalize_inn(inn_match)
+                inn_match = re.search(r'/inn/(\d{10,12})', company_url)
+                if inn_match:
+                    inn = normalize_inn(inn_match.group(1))
             
-            # Если ИНН не найден, ищем на странице
+            # Если ИНН не найден, ищем на странице с помощью регулярных выражений
             if not inn:
-                inn_elem = soup.find(string=lambda x: x and 'ИНН' in str(x))
-                if inn_elem:
-                    inn_text = inn_elem.find_next('span') or inn_elem.find_next('div')
-                    if inn_text:
-                        inn = normalize_inn(inn_text.get_text())
+                # Паттерны для поиска ИНН
+                inn_patterns = [
+                    r'ИНН[:\s</>]*(\d{10,12})',
+                    r'ИНН\s*[:\s</>]*(\d{10,12})',
+                    r'inn[:\s</>]*(\d{10,12})',
+                    r'<[^>]*>ИНН[:\s]*</[^>]*>[\s<]*(\d{10,12})',
+                ]
+                for pattern in inn_patterns:
+                    match = re.search(pattern, html_text, re.IGNORECASE)
+                    if match:
+                        inn = normalize_inn(match.group(1))
+                        if inn:
+                            break
             
-            # Название компании
-            name_elem = soup.find('h1') or soup.find('div', class_=lambda x: x and 'company-name' in str(x).lower() if x else False)
-            name = name_elem.get_text(strip=True) if name_elem else None
+            # Название компании - ищем в различных местах
+            name = None
+            # Сначала пробуем через BeautifulSoup
+            name_elem = soup.find('h1') or soup.find('title')
+            if name_elem:
+                name = name_elem.get_text(strip=True)
             
-            # Выручка - ищем в различных форматах
+            # Если не нашли, ищем с помощью регулярных выражений
+            if not name or len(name) < 3:
+                name_patterns = [
+                    r'<h1[^>]*>([^<]+)</h1>',
+                    r'<title>([^<]+)</title>',
+                    r'company-name[^>]*>([^<]+)',
+                    r'название[:\s</>]*([А-Яа-яЁё\s"«»]+)',
+                ]
+                for pattern in name_patterns:
+                    match = re.search(pattern, html_text, re.IGNORECASE)
+                    if match:
+                        name = match.group(1).strip()
+                        if name and len(name) > 3:
+                            break
+            
+            # Выручка - ищем с помощью регулярных выражений
             revenue = None
             revenue_patterns = [
-                r'выручка[:\s]*(\d+(?:\s*\d+)*)',
-                r'доход[:\s]*(\d+(?:\s*\d+)*)',
+                r'выручка[:\s</>]*(\d+(?:\s*\d+)*)\s*руб',
+                r'выручка[:\s</>]*(\d+(?:\s*\d+)*)',
+                r'доход[:\s</>]*(\d+(?:\s*\d+)*)\s*руб',
                 r'(\d+(?:\s*\d+)*)\s*руб[.\s]*выручка',
+                r'выручка[^<]*>(\d+(?:\s*\d+)*)',
+                r'<[^>]*>(\d+(?:\s*\d+)*)\s*руб[^<]*выручка',
             ]
             
-            page_text = soup.get_text()
             for pattern in revenue_patterns:
-                match = re.search(pattern, page_text, re.IGNORECASE)
+                match = re.search(pattern, html_text, re.IGNORECASE)
                 if match:
-                    revenue_str = match.group(1).replace(' ', '')
+                    revenue_str = match.group(1).replace(' ', '').replace('\xa0', '')
                     revenue = normalize_revenue(revenue_str)
-                    if revenue:  # Сохраняем любую выручку, фильтрация будет позже
+                    if revenue:
                         break
             
-            # Сайт
+            # Сайт - ищем с помощью регулярных выражений
             site = None
-            site_links = soup.find_all('a', href=lambda x: x and ('http://' in str(x) or 'https://' in str(x)))
-            for link in site_links:
-                href = link.get('href', '')
-                # Исключаем ссылки на социальные сети и внутренние ссылки
-                if not any(domain in href.lower() for domain in ['facebook', 'vk.com', 'twitter', 'linkedin', 'rusprofile.ru']):
+            # Паттерны для поиска сайта (более точные)
+            site_patterns = [
+                r'сайт[:\s</>]*https?://([^\s<"\'<>]+)',
+                r'сайт[:\s</>]*www\.([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
+                r'href=["\'](https?://(?!baturin|rusprofile|yandex|google|facebook|vk|twitter|linkedin)[^"\']+)["\']',
+                r'www\.([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})(?!.*rusprofile|.*yandex|.*google)',
+            ]
+            
+            for pattern in site_patterns:
+                matches = re.finditer(pattern, html_text, re.IGNORECASE)
+                for match in matches:
+                    href = match.group(1) if match.lastindex >= 1 else match.group(0)
+                    # Исключаем известные домены
+                    if any(domain in href.lower() for domain in ['facebook', 'vk.com', 'twitter', 'linkedin', 'rusprofile.ru', 'yandex.ru', 'google.com', 'baturin.ru', 'list-org.com', 'nalog.gov.ru']):
+                        continue
+                    if not href.startswith('http'):
+                        href = 'http://' + href
                     site = normalize_url(href)
+                    if site and 'baturin' not in site.lower():
+                        break
+                if site and 'baturin' not in site.lower():
                     break
             
-            # Сотрудники
+            # Сотрудники - ищем с помощью регулярных выражений
             employees = None
-            employees_match = re.search(r'(\d+)\s*сотрудник', page_text, re.IGNORECASE)
-            if employees_match:
-                employees = normalize_employees(employees_match.group(1))
+            employees_patterns = [
+                r'(\d+)\s*сотрудник',
+                r'сотрудник[:\s</>]*(\d+)',
+                r'персонал[:\s</>]*(\d+)',
+            ]
+            for pattern in employees_patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    employees = normalize_employees(match.group(1))
+                    if employees:
+                        break
             
-            # ОКВЭД
+            # ОКВЭД - ищем с помощью регулярных выражений
             okved = None
-            okved_match = re.search(r'ОКВЭД[:\s]*(\d{2}\.\d{2}\.\d{2})', page_text, re.IGNORECASE)
-            if okved_match:
-                okved = okved_match.group(1)
+            okved_patterns = [
+                r'ОКВЭД[:\s</>]*(\d{2}\.\d{2}\.\d{2})',
+                r'оквэд[:\s</>]*(\d{2}\.\d{2}\.\d{2})',
+                r'(\d{2}\.\d{2}\.\d{2})[^<]*оквэд',
+            ]
+            for pattern in okved_patterns:
+                match = re.search(pattern, html_text, re.IGNORECASE)
+                if match:
+                    okved = match.group(1)
+                    if okved:
+                        break
             
             if inn and name:
                 return {

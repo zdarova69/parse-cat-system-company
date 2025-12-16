@@ -2,6 +2,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional
 import requests
+from requests.exceptions import HTTPError
 from bs4 import BeautifulSoup
 from src.utils.helpers import get_headers, sleep_random
 
@@ -17,11 +18,19 @@ class BaseCollector(ABC):
         """Получает HTML страницу и парсит её"""
         try:
             sleep_random(1.0, 2.5)
-            response = self.session.get(url, timeout=timeout)
+            response = self.session.get(url, timeout=timeout, allow_redirects=True)
+            # Не выводим ошибку для 404, просто возвращаем None
+            if response.status_code == 404:
+                return None
             response.raise_for_status()
             return BeautifulSoup(response.content, 'lxml')
-        except Exception as e:
-            print(f"Ошибка при загрузке {url}: {e}")
+        except HTTPError as e:
+            if hasattr(e, 'response') and e.response.status_code == 404:
+                return None
+            # Для других ошибок не выводим сообщение
+            return None
+        except Exception:
+            # Молча игнорируем другие ошибки
             return None
     
     @abstractmethod

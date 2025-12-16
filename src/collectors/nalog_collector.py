@@ -35,7 +35,7 @@ class NalogCollector(BaseCollector):
         return companies
     
     def search_company_by_name(self, company_name: str) -> Optional[Dict]:
-        """Ищет компанию по названию на bo.nalog.gov.ru"""
+        """Ищет компанию по названию на bo.nalog.gov.ru с использованием регулярных выражений"""
         search_url = f"{self.BASE_URL}/search?query={quote(company_name)}"
         
         soup = self.fetch_page(search_url)
@@ -43,17 +43,38 @@ class NalogCollector(BaseCollector):
             return None
         
         try:
-            # Ищем ссылки на компании в результатах поиска
-            company_links = soup.find_all('a', href=True)
+            html_text = str(soup)
             name_lower = company_name.lower()
+            name_words = [w for w in name_lower.split() if len(w) > 2]
             
-            for link in company_links[:20]:
+            # Ищем ИНН в результатах поиска
+            inn_pattern = r'(?:/company/|/inn/)(\d{10,12})'
+            inn_matches = re.finditer(inn_pattern, html_text)
+            
+            for match in inn_matches:
+                inn = match.group(1)
+                start_pos = max(0, match.start() - 500)
+                end_pos = min(len(html_text), match.end() + 500)
+                context = html_text[start_pos:end_pos].lower()
+                
+                if (name_lower in context or 
+                    (len(name_words) > 0 and sum(1 for w in name_words if w in context) >= len(name_words) * 0.5)):
+                    inn_url = f"{self.BASE_URL}/inn/{inn}"
+                    company_data = self.get_company_data(inn_url)
+                    if company_data:
+                        company_name_lower = company_data.get('name', '').lower()
+                        if (name_lower in company_name_lower or 
+                            len(name_words) > 0 and sum(1 for w in name_words if w in company_name_lower) >= len(name_words) * 0.5):
+                            return company_data
+            
+            # Также пробуем через ссылки
+            company_links = soup.find_all('a', href=True)
+            for link in company_links[:30]:
                 href = link.get('href', '')
                 text = link.get_text(strip=True)
                 
                 if '/company/' in href or '/inn/' in href:
                     text_lower = text.lower()
-                    name_words = [w for w in name_lower.split() if len(w) > 2]
                     if (name_lower in text_lower or 
                         len(name_words) > 0 and sum(1 for w in name_words if w in text_lower) >= len(name_words) * 0.5):
                         company_url = href if href.startswith('http') else self.BASE_URL + href
@@ -69,64 +90,113 @@ class NalogCollector(BaseCollector):
         return None
     
     def get_company_data(self, company_url: str) -> Optional[Dict]:
-        """Получение данных о компании с bo.nalog.gov.ru"""
+        """Получение данных о компании с bo.nalog.gov.ru с использованием регулярных выражений"""
         soup = self.fetch_page(company_url)
         if not soup:
             return None
         
         try:
-            # ИНН
+            html_text = str(soup)
+            page_text = soup.get_text()
+            
+            # ИНН - ищем с помощью регулярных выражений
             inn = None
             if '/inn/' in company_url:
-                inn_match = company_url.split('/inn/')[-1].split('/')[0]
-                inn = normalize_inn(inn_match)
+                inn_match = re.search(r'/inn/(\d{10,12})', company_url)
+                if inn_match:
+                    inn = normalize_inn(inn_match.group(1))
             
             if not inn:
-                inn_elem = soup.find(string=lambda x: x and 'ИНН' in str(x))
-                if inn_elem:
-                    parent = inn_elem.find_parent()
-                    if parent:
-                        inn_text = parent.get_text()
-                        inn = normalize_inn(inn_text)
+                inn_patterns = [
+                    r'ИНН[:\s</>]*(\d{10,12})',
+                    r'ИНН\s*[:\s</>]*(\d{10,12})',
+                    r'inn[:\s</>]*(\d{10,12})',
+                ]
+                for pattern in inn_patterns:
+                    match = re.search(pattern, html_text, re.IGNORECASE)
+                    if match:
+                        inn = normalize_inn(match.group(1))
+                        if inn:
+                            break
             
             # Название
+            name = None
             name_elem = soup.find('h1') or soup.find('title')
-            name = name_elem.get_text(strip=True) if name_elem else None
+            if name_elem:
+                name = name_elem.get_text(strip=True)
             
-            # Выручка (на nalog.gov.ru может быть не указана)
+            if not name or len(name) < 3:
+                name_patterns = [
+                    r'<h1[^>]*>([^<]+)</h1>',
+                    r'<title>([^<]+)</title>',
+                    r'название[:\s</>]*([А-Яа-яЁё\s"«»]+)',
+                ]
+                for pattern in name_patterns:
+                    match = re.search(pattern, html_text, re.IGNORECASE)
+                    if match:
+                        name = match.group(1).strip()
+                        if name and len(name) > 3:
+                            break
+            
+            # Выручка
             revenue = None
-            revenue_elem = soup.find(string=lambda x: x and ('выручка' in str(x).lower() or 'доход' in str(x).lower()))
-            if revenue_elem:
-                parent = revenue_elem.find_parent()
-                if parent:
-                    revenue_text = parent.get_text()
-                    revenue = normalize_revenue(revenue_text)
+            revenue_patterns = [
+                r'выручка[:\s</>]*(\d+(?:\s*\d+)*)\s*руб',
+                r'выручка[:\s</>]*(\d+(?:\s*\d+)*)',
+                r'доход[:\s</>]*(\d+(?:\s*\d+)*)\s*руб',
+            ]
+            for pattern in revenue_patterns:
+                match = re.search(pattern, html_text, re.IGNORECASE)
+                if match:
+                    revenue_str = match.group(1).replace(' ', '').replace('\xa0', '')
+                    revenue = normalize_revenue(revenue_str)
+                    if revenue:
+                        break
             
             # Сайт
             site = None
-            site_elem = soup.find('a', href=lambda x: x and ('http://' in str(x) or 'https://' in str(x)))
-            if site_elem:
-                site = normalize_url(site_elem.get('href'))
+            site_patterns = [
+                r'href=["\'](https?://[^"\']+)["\']',
+                r'сайт[:\s</>]*https?://([^\s<]+)',
+            ]
+            for pattern in site_patterns:
+                matches = re.finditer(pattern, html_text, re.IGNORECASE)
+                for match in matches:
+                    href = match.group(1) if match.lastindex >= 1 else match.group(0)
+                    if not any(domain in href.lower() for domain in ['facebook', 'vk.com', 'twitter', 'linkedin', 'nalog.gov.ru', 'yandex.ru', 'google.com']):
+                        if not href.startswith('http'):
+                            href = 'http://' + href
+                        site = normalize_url(href)
+                        if site:
+                            break
+                if site:
+                    break
             
             # Сотрудники
             employees = None
-            employees_elem = soup.find(string=lambda x: x and 'сотрудник' in str(x).lower())
-            if employees_elem:
-                parent = employees_elem.find_parent()
-                if parent:
-                    employees_text = parent.get_text()
-                    employees = normalize_employees(employees_text)
+            employees_patterns = [
+                r'(\d+)\s*сотрудник',
+                r'сотрудник[:\s</>]*(\d+)',
+            ]
+            for pattern in employees_patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    employees = normalize_employees(match.group(1))
+                    if employees:
+                        break
             
             # ОКВЭД
             okved = None
-            okved_elem = soup.find(string=lambda x: x and 'оквэд' in str(x).lower())
-            if okved_elem:
-                parent = okved_elem.find_parent()
-                if parent:
-                    okved_text = parent.get_text()
-                    okved_match = re.search(r'\d{2}\.\d{2}\.\d{2}', okved_text)
-                    if okved_match:
-                        okved = okved_match.group()
+            okved_patterns = [
+                r'ОКВЭД[:\s</>]*(\d{2}\.\d{2}\.\d{2})',
+                r'оквэд[:\s</>]*(\d{2}\.\d{2}\.\d{2})',
+            ]
+            for pattern in okved_patterns:
+                match = re.search(pattern, html_text, re.IGNORECASE)
+                if match:
+                    okved = match.group(1)
+                    if okved:
+                        break
             
             if inn and name:
                 return {

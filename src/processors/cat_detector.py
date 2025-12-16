@@ -1,12 +1,28 @@
 """Детектор CAT-систем на сайтах компаний"""
 import re
 from typing import Optional, Dict, Tuple
-from src.collectors.base_collector import BaseCollector
-from src.utils.helpers import normalize_url
+import requests
+from bs4 import BeautifulSoup
+from src.utils.helpers import normalize_url, get_headers, sleep_random
 
 
-class CATDetector(BaseCollector):
+class CATDetector:
     """Класс для определения наличия CAT-систем на сайте компании"""
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update(get_headers())
+    
+    def fetch_page(self, url: str, timeout: int = 10) -> Optional[BeautifulSoup]:
+        """Получает HTML страницу и парсит её"""
+        try:
+            sleep_random(1.0, 2.5)
+            response = self.session.get(url, timeout=timeout)
+            response.raise_for_status()
+            return BeautifulSoup(response.content, 'lxml')
+        except Exception as e:
+            print(f"Ошибка при загрузке {url}: {e}")
+            return None
     
     # Ключевые слова для поиска CAT-систем
     CAT_KEYWORDS = [
