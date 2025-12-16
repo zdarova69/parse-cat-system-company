@@ -1,4 +1,2 @@
-# Data processors package
-
-
+# Processors module
 

@@ -1,186 +1,140 @@
-"""Сборщик данных с list-org.com."""
-
+"""Коллектор данных с list-org.com"""
 import re
-from typing import List, Dict
-from bs4 import BeautifulSoup
+from typing import List, Dict, Optional
+from urllib.parse import quote
 from src.collectors.base_collector import BaseCollector
-from src.processors.cat_detector import check_website_for_cat, detect_cat_from_description
-from src.utils.helpers import normalize_revenue, normalize_inn
+from src.utils.helpers import normalize_revenue, normalize_inn, normalize_employees, normalize_url
 
 
 class ListOrgCollector(BaseCollector):
-    """Сборщик данных с list-org.com."""
+    """Коллектор для list-org.com"""
     
-    def __init__(self):
-        super().__init__()
-        self.base_url = "https://www.list-org.com"
+    BASE_URL = "https://www.list-org.com"
     
-    def collect(self, query: str = None, limit: int = 100) -> List[Dict]:
-        """
-        Собирает компании с list-org.com.
-        
-        Парсит результаты поиска по ключевым словам, связанным с переводами и локализацией.
-        """
+    def search_companies(self, query: str, max_results: int = 50) -> List[Dict]:
+        """Поиск компаний на list-org.com"""
         companies = []
+        search_url = f"{self.BASE_URL}/search?query={quote(query)}"
         
-        # Поисковые запросы, связанные с переводами и локализацией
-        search_queries = [
-            "перевод",
-            "локализация",
-            "translation",
-            "localization",
-            "лингвистическ",
-            "переводческ",
-        ]
+        soup = self.fetch_page(search_url)
+        if not soup:
+            return companies
         
-        if query:
-            search_queries = [query]
-        
-        # Парсим результаты поиска для каждого запроса
-        for search_query in search_queries:
-            if len(companies) >= limit:
-                break
-            
-            try:
-                # Формируем URL для поиска
-                search_url = f"{self.base_url}/search?query={search_query}"
-                print(f"   Парсинг поиска: {search_query}")
-                
-                # Выполняем запрос
-                response = self.make_request(search_url)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Ищем ссылки на компании в результатах поиска
-                # На list-org.com ссылки обычно в таблице или списке
-                company_links = soup.find_all('a', href=re.compile(r'/company/\d+'))
-                
-                # Если не нашли, пробуем другой селектор
-                if not company_links:
-                    company_links = soup.find_all('a', href=re.compile(r'/org/\d+'))
-                
-                for link in company_links[:20]:  # Ограничиваем количество на странице
-                    if len(companies) >= limit:
+        # Ищем ссылки на компании
+        company_links = soup.find_all('a', href=True)
+        for link in company_links[:max_results]:
+            href = link.get('href', '')
+            if '/company/' in href or '/org/' in href:
+                company_url = href if href.startswith('http') else self.BASE_URL + href
+                company_data = self.get_company_data(company_url)
+                if company_data:
+                    companies.append(company_data)
+                    if len(companies) >= max_results:
                         break
-                    
-                    try:
-                        # Получаем URL страницы компании
-                        company_url = self.base_url + link.get('href')
-                        
-                        # Парсим страницу компании
-                        company_data = self._parse_company_page(company_url)
-                        
-                        if company_data:
-                            # Проверяем сайт компании на наличие CAT-системы
-                            if company_data.get('site'):
-                                has_cat, evidence, product = check_website_for_cat(company_data['site'])
-                                if has_cat:
-                                    company_data['cat_evidence'] = evidence
-                                    if product:
-                                        company_data['cat_product'] = product
-                                    company_data['source'] = 'list-org'
-                                    companies.append(company_data)
-                    except Exception as e:
-                        print(f"      Ошибка при парсинге компании: {e}")
-                        continue
-                        
-            except Exception as e:
-                print(f"   Ошибка при поиске '{search_query}': {e}")
-                continue
         
         return companies
     
-    def _parse_company_page(self, url: str) -> Dict:
-        """
-        Парсит страницу компании на list-org.com.
+    def search_company_by_name(self, company_name: str) -> Optional[Dict]:
+        """Ищет компанию по названию на list-org.com"""
+        search_url = f"{self.BASE_URL}/search?query={quote(company_name)}"
         
-        Извлекает: ИНН, название, выручку, сайт, сотрудников, ОКВЭД.
-        """
+        soup = self.fetch_page(search_url)
+        if not soup:
+            return None
+        
         try:
-            response = self.make_request(url)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # Ищем ссылки на компании в результатах поиска
+            company_links = soup.find_all('a', href=True)
+            name_lower = company_name.lower()
             
-            company_data = {}
-            
-            # Извлекаем ИНН
-            inn_elem = soup.find('td', string=re.compile(r'ИНН'))
-            if inn_elem:
-                inn_next = inn_elem.find_next_sibling('td')
-                if inn_next:
-                    company_data['inn'] = normalize_inn(inn_next.get_text(strip=True))
-            
-            # Альтернативный способ поиска ИНН
-            if not company_data.get('inn'):
-                inn_match = re.search(r'ИНН[:\s]+(\d{10,12})', soup.get_text())
-                if inn_match:
-                    company_data['inn'] = normalize_inn(inn_match.group(1))
-            
-            # Извлекаем название
-            name_elem = soup.find('h1')
-            if not name_elem:
-                name_elem = soup.find('div', class_=re.compile(r'company-name|org-name'))
-            if name_elem:
-                company_data['name'] = name_elem.get_text(strip=True)
-            
-            # Извлекаем выручку
-            revenue_elem = soup.find('td', string=re.compile(r'Выручка|Доход|Оборот'))
-            if revenue_elem:
-                revenue_next = revenue_elem.find_next_sibling('td')
-                if revenue_next:
-                    revenue_text = revenue_next.get_text(strip=True)
-                    company_data['revenue'] = normalize_revenue(revenue_text)
-            
-            # Альтернативный способ поиска выручки
-            if not company_data.get('revenue'):
-                revenue_match = re.search(r'Выручка[:\s]+([\d\s,\.]+)', soup.get_text())
-                if revenue_match:
-                    company_data['revenue'] = normalize_revenue(revenue_match.group(1))
-            
-            # Извлекаем сайт
-            site_elem = soup.find('a', href=re.compile(r'^https?://'))
-            if site_elem:
-                site_href = site_elem.get('href', '')
-                if site_href and not site_href.startswith(self.base_url):
-                    company_data['site'] = site_href
-            
-            # Альтернативный способ поиска сайта
-            if not company_data.get('site'):
-                site_elem = soup.find('td', string=re.compile(r'Сайт|Website'))
-                if site_elem:
-                    site_next = site_elem.find_next_sibling('td')
-                    if site_next:
-                        site_link = site_next.find('a')
-                        if site_link:
-                            company_data['site'] = site_link.get('href', '')
-            
-            # Извлекаем количество сотрудников
-            employees_elem = soup.find('td', string=re.compile(r'Сотрудников|Работников|Численность'))
-            if employees_elem:
-                employees_next = employees_elem.find_next_sibling('td')
-                if employees_next:
-                    employees_text = employees_next.get_text(strip=True)
-                    employees_num = re.sub(r'[^\d]', '', employees_text)
-                    if employees_num:
-                        try:
-                            company_data['employees'] = int(employees_num)
-                        except:
-                            pass
-            
-            # Извлекаем основной ОКВЭД
-            okved_elem = soup.find('td', string=re.compile(r'ОКВЭД'))
-            if okved_elem:
-                okved_next = okved_elem.find_next_sibling('td')
-                if okved_next:
-                    okved_text = okved_next.get_text(strip=True)
-                    okved_match = re.search(r'(\d{2}\.\d{2})', okved_text)
-                    if okved_match:
-                        company_data['okved_main'] = okved_match.group(1)
-            
-            # Проверяем, что есть минимально необходимые данные
-            if company_data.get('inn') and company_data.get('name'):
-                return company_data
-            
-            return None
-            
+            for link in company_links[:20]:
+                href = link.get('href', '')
+                text = link.get_text(strip=True)
+                
+                if '/company/' in href or '/org/' in href:
+                    text_lower = text.lower()
+                    name_words = [w for w in name_lower.split() if len(w) > 2]
+                    if (name_lower in text_lower or 
+                        len(name_words) > 0 and sum(1 for w in name_words if w in text_lower) >= len(name_words) * 0.5):
+                        company_url = href if href.startswith('http') else self.BASE_URL + href
+                        company_data = self.get_company_data(company_url)
+                        if company_data:
+                            company_name_lower = company_data.get('name', '').lower()
+                            if (name_lower in company_name_lower or 
+                                len(name_words) > 0 and sum(1 for w in name_words if w in company_name_lower) >= len(name_words) * 0.5):
+                                return company_data
         except Exception as e:
-            print(f"      Ошибка при парсинге страницы {url}: {e}")
+            print(f"      Ошибка при поиске на list-org.com: {e}")
+        
+        return None
+    
+    def get_company_data(self, company_url: str) -> Optional[Dict]:
+        """Получение данных о компании с list-org.com"""
+        soup = self.fetch_page(company_url)
+        if not soup:
             return None
+        
+        try:
+            # ИНН
+            inn = None
+            inn_elem = soup.find(string=lambda x: x and 'ИНН' in str(x))
+            if inn_elem:
+                parent = inn_elem.find_parent()
+                if parent:
+                    inn_text = parent.get_text()
+                    inn = normalize_inn(inn_text)
+            
+            # Название
+            name_elem = soup.find('h1') or soup.find('title')
+            name = name_elem.get_text(strip=True) if name_elem else None
+            
+            # Выручка
+            revenue = None
+            revenue_elem = soup.find(string=lambda x: x and ('выручка' in str(x).lower() or 'доход' in str(x).lower()))
+            if revenue_elem:
+                parent = revenue_elem.find_parent()
+                if parent:
+                    revenue_text = parent.get_text()
+                    revenue = normalize_revenue(revenue_text)
+            
+            # Сайт
+            site = None
+            site_elem = soup.find('a', href=lambda x: x and ('http://' in str(x) or 'https://' in str(x)))
+            if site_elem:
+                site = normalize_url(site_elem.get('href'))
+            
+            # Сотрудники
+            employees = None
+            employees_elem = soup.find(string=lambda x: x and 'сотрудник' in str(x).lower())
+            if employees_elem:
+                parent = employees_elem.find_parent()
+                if parent:
+                    employees_text = parent.get_text()
+                    employees = normalize_employees(employees_text)
+            
+            # ОКВЭД
+            okved = None
+            okved_elem = soup.find(string=lambda x: x and 'оквэд' in str(x).lower())
+            if okved_elem:
+                parent = okved_elem.find_parent()
+                if parent:
+                    okved_text = parent.get_text()
+                    okved_match = re.search(r'\d{2}\.\d{2}\.\d{2}', okved_text)
+                    if okved_match:
+                        okved = okved_match.group()
+            
+            if inn and name:
+                return {
+                    'inn': inn,
+                    'name': name.strip(),
+                    'revenue': revenue,
+                    'site': site,
+                    'employees': employees,
+                    'okved_main': okved,
+                    'source': 'list-org'
+                }
+        except Exception as e:
+            print(f"Ошибка при парсинге {company_url}: {e}")
+        
+        return None
+

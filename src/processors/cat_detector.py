@@ -1,172 +1,106 @@
-"""Модуль для определения использования CAT-систем на сайтах компаний."""
-
+"""Детектор CAT-систем на сайтах компаний"""
 import re
-from typing import Dict, Optional, Tuple
-import requests
-from bs4 import BeautifulSoup
-from src.utils.helpers import get_random_user_agent, delay
+from typing import Optional, Dict, Tuple
+from src.collectors.base_collector import BaseCollector
+from src.utils.helpers import normalize_url
 
 
-# Ключевые слова, указывающие на использование CAT-систем
-CAT_KEYWORDS = [
-    # CAT-системы
-    'cat-систем', 'cat система', 'cat system',
-    'translation memory', 'tm', 'translation memory system',
-    'tms', 'translation management system',
-    'локализац', 'localization',
-    'переводческ', 'translation',
+class CATDetector(BaseCollector):
+    """Класс для определения наличия CAT-систем на сайте компании"""
     
-    # Конкретные CAT-продукты
-    'sdl trados', 'trados',
-    'memoq', 'memo q',
-    'memsource',
-    'smartcat',
-    'xtm',
-    'phrase',
-    'wordfast',
-    'deja vu', 'dejavu',
-    'omega t',
-    'cafe trans',
-    'matecat',
-    'crowdin',
-    'lokalise',
+    # Ключевые слова для поиска CAT-систем
+    CAT_KEYWORDS = [
+        'cat-систем', 'cat систем', 'cat система',
+        'translation memory', 'tm', 'tms', 'translation management',
+        'локализационн', 'локализац', 'localization',
+        'переводческ', 'переводн', 'translation',
+        'memsource', 'smartcat', 'sdl trados', 'trados',
+        'memoq', 'phrase', 'xtm', 'crowdin', 'lokalise',
+        'wordfast', 'omegat', 'deja vu',
+        'терминологическ', 'терминолог',
+        'память перевод', 'memory перевод',
+        'workflow перевод', 'процесс перевод',
+        'qa перевод', 'lqa', 'quality assurance',
+        'сегментац', 'сегмент',
+    ]
     
-    # Функции
-    'терминологическ', 'terminology',
-    'сегментац', 'segmentation',
-    'память перевод', 'translation memory',
-    'qa перев', 'lqa',
-    'workflow',
-    'переводческ платформ',
-]
-
-
-def check_website_for_cat(website: str, timeout: int = 10) -> Tuple[bool, str, Optional[str]]:
-    """
-    Проверяет, упоминается ли CAT-система на сайте компании.
+    # Названия конкретных продуктов
+    CAT_PRODUCTS = {
+        'sdl trados': 'SDL Trados',
+        'trados': 'SDL Trados',
+        'memoq': 'MemoQ',
+        'memsource': 'Memsource',
+        'smartcat': 'Smartcat',
+        'xtm': 'XTM',
+        'phrase': 'Phrase',
+        'crowdin': 'Crowdin',
+        'lokalise': 'Lokalise',
+        'wordfast': 'Wordfast',
+        'omegat': 'OmegaT',
+        'deja vu': 'Déjà Vu',
+    }
     
-    Парсит HTML страницы и ищет ключевые слова, связанные с CAT-системами.
-    
-    Возвращает:
-        (has_cat, evidence, product_name) - есть ли CAT, доказательство, название продукта
-    """
-    if not website or not website.startswith(('http://', 'https://')):
-        return False, "", None
-    
-    try:
-        headers = {
-            'User-Agent': get_random_user_agent(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-        }
+    def detect_cat(self, site_url: str) -> Tuple[bool, Optional[str], Optional[str]]:
+        """
+        Определяет наличие CAT-системы на сайте компании
         
-        delay(1.0)  # Вежливость к серверам
+        Returns:
+            (has_cat, evidence, product_name)
+        """
+        if not site_url:
+            return False, None, None
         
-        # Выполняем HTTP-запрос к сайту компании
-        response = requests.get(website, headers=headers, timeout=timeout, allow_redirects=True)
-        response.raise_for_status()
+        site_url = normalize_url(site_url)
+        if not site_url:
+            return False, None, None
         
-        # Проверяем тип контента
-        content_type = response.headers.get('Content-Type', '').lower()
-        if 'text/html' not in content_type:
-            return False, "", None
-        
-        # Парсим HTML
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Извлекаем текст из основных областей контента
-        text_content = ""
-        
-        # Проверяем основные секции страницы
-        for selector in ['main', 'article', '.content', '#content', '.main-content', 'body']:
-            elements = soup.select(selector)
-            if elements:
-                text_content += " " + elements[0].get_text(separator=' ', strip=True)
-        
-        # Также проверяем навигацию и разделы услуг
-        for selector in ['nav', '.services', '.about', '.technologies', '.solutions']:
-            elements = soup.select(selector)
-            for elem in elements:
-                text_content += " " + elem.get_text(separator=' ', strip=True)
-        
-        # Нормализуем текст (в нижний регистр)
-        text_content = text_content.lower()
-        
-        # Ищем ключевые слова
-        found_keywords = []
-        found_product = None
-        
-        for keyword in CAT_KEYWORDS:
-            if keyword.lower() in text_content:
-                found_keywords.append(keyword)
+        try:
+            soup = self.fetch_page(site_url, timeout=8)
+            if not soup:
+                return False, None, None
+            
+            # Получаем весь текст страницы
+            page_text = soup.get_text().lower()
+            
+            # Ищем упоминания CAT-систем
+            found_keywords = []
+            found_product = None
+            
+            for keyword in self.CAT_KEYWORDS:
+                if keyword.lower() in page_text:
+                    found_keywords.append(keyword)
+            
+            # Ищем конкретные продукты
+            for product_key, product_name in self.CAT_PRODUCTS.items():
+                if product_key.lower() in page_text:
+                    found_product = product_name
+                    break
+            
+            if found_keywords or found_product:
+                # Формируем доказательство
+                evidence_parts = []
                 
-                # Проверяем, является ли это названием продукта
-                if keyword.lower() in ['sdl trados', 'trados', 'memoq', 'memsource', 
-                                      'smartcat', 'xtm', 'phrase', 'wordfast', 
-                                      'deja vu', 'dejavu', 'omega t', 'cafe trans',
-                                      'matecat', 'crowdin', 'lokalise']:
-                    found_product = keyword.title()
-        
-        if found_keywords:
-            # Формируем доказательство
-            evidence_parts = []
-            if found_product:
-                evidence_parts.append(f"Упоминание продукта {found_product}")
-            else:
-                evidence_parts.append("Упоминание CAT/TMS/локализации")
+                # Проверяем разделы сайта
+                sections = []
+                for section in ['технологи', 'услуг', 'о нас', 'about', 'services', 'technology']:
+                    if section in page_text:
+                        sections.append(section)
+                
+                if sections:
+                    evidence_parts.append(f"Упоминание в разделе '{sections[0]}'")
+                
+                if found_product:
+                    evidence_parts.append(f"Использование продукта {found_product}")
+                elif found_keywords:
+                    evidence_parts.append(f"Упоминание: {found_keywords[0]}")
+                
+                evidence = " | ".join(evidence_parts) if evidence_parts else "Упоминание CAT/TMS/локализации"
+                
+                return True, evidence, found_product
             
-            # Пытаемся найти контекст упоминания
-            for keyword in found_keywords[:3]:  # Первые 3 ключевых слова
-                pattern = re.compile(r'.{0,50}' + re.escape(keyword) + r'.{0,50}', re.IGNORECASE)
-                matches = pattern.findall(text_content)
-                if matches:
-                    context = matches[0].strip()
-                    if len(context) > 20:
-                        evidence_parts.append(f"контекст: {context[:100]}")
-                        break
+            return False, None, None
             
-            evidence = " | ".join(evidence_parts)
-            return True, evidence, found_product
-        
-        return False, "", None
-        
-    except requests.exceptions.RequestException as e:
-        # Сайт недоступен или ошибка запроса
-        return False, f"Ошибка доступа к сайту: {str(e)[:50]}", None
-    except Exception as e:
-        return False, f"Ошибка парсинга: {str(e)[:50]}", None
-
-
-def detect_cat_from_description(description: str) -> Tuple[bool, str, Optional[str]]:
-    """
-    Определяет CAT-систему из текстового описания.
-    
-    Анализирует текст на наличие ключевых слов, связанных с CAT-системами.
-    
-    Возвращает:
-        (has_cat, evidence, product_name) - есть ли CAT, доказательство, название продукта
-    """
-    if not description:
-        return False, "", None
-    
-    text_lower = description.lower()
-    found_keywords = []
-    found_product = None
-    
-    for keyword in CAT_KEYWORDS:
-        if keyword.lower() in text_lower:
-            found_keywords.append(keyword)
-            
-            if keyword.lower() in ['sdl trados', 'trados', 'memoq', 'memsource', 
-                                  'smartcat', 'xtm', 'phrase', 'wordfast']:
-                found_product = keyword.title()
-    
-    if found_keywords:
-        evidence = f"Упоминание в описании: {', '.join(found_keywords[:3])}"
-        return True, evidence, found_product
-    
-    return False, "", None
-
-
-
+        except Exception as e:
+            print(f"Ошибка при проверке сайта {site_url}: {e}")
+            return False, None, None
 

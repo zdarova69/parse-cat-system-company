@@ -1,153 +1,145 @@
-"""Сборщик данных о выручке с bo.nalog.gov.ru по ИНН."""
-
+"""Коллектор данных с bo.nalog.gov.ru (официальный сайт ФНС)"""
 import re
-from typing import Optional, Dict
-from bs4 import BeautifulSoup
+from typing import List, Dict, Optional
+from urllib.parse import quote
 from src.collectors.base_collector import BaseCollector
-from src.utils.helpers import normalize_revenue, normalize_inn
+from src.utils.helpers import normalize_revenue, normalize_inn, normalize_employees, normalize_url
 
 
 class NalogCollector(BaseCollector):
-    """Сборщик данных о выручке с bo.nalog.gov.ru по ИНН."""
+    """Коллектор для bo.nalog.gov.ru"""
     
-    def __init__(self):
-        super().__init__()
-        self.base_url = "https://bo.nalog.gov.ru"
+    BASE_URL = "https://bo.nalog.gov.ru"
     
-    def get_revenue_by_inn(self, inn: str) -> Optional[int]:
-        """
-        Получает выручку компании по ИНН с сайта bo.nalog.gov.ru.
+    def search_companies(self, query: str, max_results: int = 50) -> List[Dict]:
+        """Поиск компаний на bo.nalog.gov.ru"""
+        companies = []
+        search_url = f"{self.BASE_URL}/search?query={quote(query)}"
         
-        Args:
-            inn: ИНН компании (10 или 12 цифр)
-            
-        Returns:
-            Выручка в рублях (int) или None, если не найдено
-        """
-        inn_normalized = normalize_inn(inn)
-        if not inn_normalized:
+        soup = self.fetch_page(search_url)
+        if not soup:
+            return companies
+        
+        # Ищем ссылки на компании
+        company_links = soup.find_all('a', href=True)
+        for link in company_links[:max_results]:
+            href = link.get('href', '')
+            if '/company/' in href or '/inn/' in href:
+                company_url = href if href.startswith('http') else self.BASE_URL + href
+                company_data = self.get_company_data(company_url)
+                if company_data:
+                    companies.append(company_data)
+                    if len(companies) >= max_results:
+                        break
+        
+        return companies
+    
+    def search_company_by_name(self, company_name: str) -> Optional[Dict]:
+        """Ищет компанию по названию на bo.nalog.gov.ru"""
+        search_url = f"{self.BASE_URL}/search?query={quote(company_name)}"
+        
+        soup = self.fetch_page(search_url)
+        if not soup:
             return None
         
         try:
-            # Формируем URL для поиска компании по ИНН
-            search_url = f"{self.base_url}/search?query={inn_normalized}"
+            # Ищем ссылки на компании в результатах поиска
+            company_links = soup.find_all('a', href=True)
+            name_lower = company_name.lower()
             
-            # Выполняем запрос
-            response = self.make_request(search_url)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Ищем ссылку на страницу компании
-            company_link = soup.find('a', href=re.compile(r'/company/\d+'))
-            if not company_link:
-                # Пробуем другой формат ссылки
-                company_link = soup.find('a', href=re.compile(r'/ul/\d+'))
-            
-            if not company_link:
-                return None
-            
-            # Получаем URL страницы компании
-            company_url = self.base_url + company_link.get('href')
-            
-            # Парсим страницу компании
-            return self._parse_company_revenue(company_url, inn_normalized)
-            
+            for link in company_links[:20]:
+                href = link.get('href', '')
+                text = link.get_text(strip=True)
+                
+                if '/company/' in href or '/inn/' in href:
+                    text_lower = text.lower()
+                    name_words = [w for w in name_lower.split() if len(w) > 2]
+                    if (name_lower in text_lower or 
+                        len(name_words) > 0 and sum(1 for w in name_words if w in text_lower) >= len(name_words) * 0.5):
+                        company_url = href if href.startswith('http') else self.BASE_URL + href
+                        company_data = self.get_company_data(company_url)
+                        if company_data:
+                            company_name_lower = company_data.get('name', '').lower()
+                            if (name_lower in company_name_lower or 
+                                len(name_words) > 0 and sum(1 for w in name_words if w in company_name_lower) >= len(name_words) * 0.5):
+                                return company_data
         except Exception as e:
-            print(f"      Ошибка при получении выручки для ИНН {inn_normalized}: {e}")
-            return None
-    
-    def _parse_company_revenue(self, url: str, inn: str) -> Optional[int]:
-        """
-        Парсит страницу компании на bo.nalog.gov.ru и извлекает выручку.
+            print(f"      Ошибка при поиске на nalog.gov.ru: {e}")
         
-        Args:
-            url: URL страницы компании
-            inn: ИНН для проверки
-            
-        Returns:
-            Выручка в рублях (int) или None
-        """
+        return None
+    
+    def get_company_data(self, company_url: str) -> Optional[Dict]:
+        """Получение данных о компании с bo.nalog.gov.ru"""
+        soup = self.fetch_page(company_url)
+        if not soup:
+            return None
+        
         try:
-            response = self.make_request(url)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # ИНН
+            inn = None
+            if '/inn/' in company_url:
+                inn_match = company_url.split('/inn/')[-1].split('/')[0]
+                inn = normalize_inn(inn_match)
             
-            # Ищем выручку в финансовых показателях
-            # На сайте ФНС данные могут быть в таблицах или списках
+            if not inn:
+                inn_elem = soup.find(string=lambda x: x and 'ИНН' in str(x))
+                if inn_elem:
+                    parent = inn_elem.find_parent()
+                    if parent:
+                        inn_text = parent.get_text()
+                        inn = normalize_inn(inn_text)
             
-            # Способ 1: Ищем по тексту "Выручка"
-            revenue_elem = soup.find('td', string=re.compile(r'Выручка', re.IGNORECASE))
+            # Название
+            name_elem = soup.find('h1') or soup.find('title')
+            name = name_elem.get_text(strip=True) if name_elem else None
+            
+            # Выручка (на nalog.gov.ru может быть не указана)
+            revenue = None
+            revenue_elem = soup.find(string=lambda x: x and ('выручка' in str(x).lower() or 'доход' in str(x).lower()))
             if revenue_elem:
-                revenue_next = revenue_elem.find_next_sibling('td')
-                if revenue_next:
-                    revenue_text = revenue_next.get_text(strip=True)
+                parent = revenue_elem.find_parent()
+                if parent:
+                    revenue_text = parent.get_text()
                     revenue = normalize_revenue(revenue_text)
-                    if revenue:
-                        return revenue
             
-            # Способ 2: Ищем в таблице финансовых показателей
-            # Ищем таблицу с финансовыми данными
-            tables = soup.find_all('table')
-            for table in tables:
-                rows = table.find_all('tr')
-                for row in rows:
-                    cells = row.find_all(['td', 'th'])
-                    if len(cells) >= 2:
-                        first_cell = cells[0].get_text(strip=True).lower()
-                        if 'выручка' in first_cell or 'доход' in first_cell or 'оборот' in first_cell:
-                            revenue_text = cells[1].get_text(strip=True)
-                            revenue = normalize_revenue(revenue_text)
-                            if revenue:
-                                return revenue
+            # Сайт
+            site = None
+            site_elem = soup.find('a', href=lambda x: x and ('http://' in str(x) or 'https://' in str(x)))
+            if site_elem:
+                site = normalize_url(site_elem.get('href'))
             
-            # Способ 3: Ищем по регулярному выражению в тексте страницы
-            page_text = soup.get_text()
-            revenue_patterns = [
-                r'Выручка[:\s]+([\d\s,\.]+)',
-                r'Доход[:\s]+([\d\s,\.]+)',
-                r'Оборот[:\s]+([\d\s,\.]+)',
-            ]
+            # Сотрудники
+            employees = None
+            employees_elem = soup.find(string=lambda x: x and 'сотрудник' in str(x).lower())
+            if employees_elem:
+                parent = employees_elem.find_parent()
+                if parent:
+                    employees_text = parent.get_text()
+                    employees = normalize_employees(employees_text)
             
-            for pattern in revenue_patterns:
-                matches = re.findall(pattern, page_text, re.IGNORECASE)
-                for match in matches:
-                    revenue = normalize_revenue(match)
-                    if revenue:
-                        return revenue
+            # ОКВЭД
+            okved = None
+            okved_elem = soup.find(string=lambda x: x and 'оквэд' in str(x).lower())
+            if okved_elem:
+                parent = okved_elem.find_parent()
+                if parent:
+                    okved_text = parent.get_text()
+                    okved_match = re.search(r'\d{2}\.\d{2}\.\d{2}', okved_text)
+                    if okved_match:
+                        okved = okved_match.group()
             
-            return None
-            
+            if inn and name:
+                return {
+                    'inn': inn,
+                    'name': name.strip(),
+                    'revenue': revenue,
+                    'site': site,
+                    'employees': employees,
+                    'okved_main': okved,
+                    'source': 'nalog.gov.ru'
+                }
         except Exception as e:
-            print(f"      Ошибка при парсинге страницы {url}: {e}")
-            return None
-    
-    def enrich_company_revenue(self, company: Dict) -> Dict:
-        """
-        Обогащает данные компании выручкой с bo.nalog.gov.ru, если её нет или нужно проверить.
+            print(f"Ошибка при парсинге {company_url}: {e}")
         
-        Args:
-            company: Словарь с данными компании
-            
-        Returns:
-            Обогащенный словарь с данными компании
-        """
-        inn = company.get('inn')
-        if not inn:
-            return company
-        
-        # Если выручка уже есть и достаточная, можно не проверять
-        existing_revenue = company.get('revenue')
-        if existing_revenue and isinstance(existing_revenue, (int, float)) and existing_revenue >= 100_000_000:
-            return company
-        
-        # Получаем выручку с сайта ФНС
-        revenue_from_nalog = self.get_revenue_by_inn(inn)
-        if revenue_from_nalog:
-            # Используем выручку с ФНС, если она больше или если исходной не было
-            if not existing_revenue or (isinstance(revenue_from_nalog, (int, float)) and revenue_from_nalog > existing_revenue):
-                company['revenue'] = revenue_from_nalog
-                # Обновляем источник, если выручка взята с ФНС
-                existing_source = company.get('source', '')
-                if 'nalog.gov.ru' not in existing_source:
-                    company['source'] = f"{existing_source}, nalog.gov.ru" if existing_source else "nalog.gov.ru"
-        
-        return company
+        return None
 

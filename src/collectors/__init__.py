@@ -1,4 +1,2 @@
-# Data collectors package
-
-
+# Collectors module
 

@@ -1,97 +1,85 @@
-"""Утилиты для обработки данных."""
-
+"""Вспомогательные функции для работы с данными"""
 import re
 import time
 from typing import Optional
 from fake_useragent import UserAgent
 
 
-def normalize_revenue(revenue_str: str) -> Optional[int]:
-    """
-    Нормализует строку с выручкой в целое число (в рублях).
-    
-    Примеры:
-        "100 000 000" -> 100000000
-        "100.5 млн" -> 100500000
-        "1,234,567" -> 1234567
-    """
-    if not revenue_str or not isinstance(revenue_str, str):
+ua = UserAgent()
+
+
+def normalize_revenue(revenue_str: Optional[str]) -> Optional[int]:
+    """Нормализует строку выручки в число (рубли)"""
+    if not revenue_str:
         return None
     
-    # Удаляем все пробелы
-    revenue_str = revenue_str.replace(' ', '').replace('\xa0', '')
+    # Удаляем все нецифровые символы кроме минуса
+    revenue_clean = re.sub(r'[^\d-]', '', str(revenue_str))
     
-    # Обработка миллионов
-    if 'млн' in revenue_str.lower() or 'million' in revenue_str.lower():
-        # Извлекаем число
-        numbers = re.findall(r'[\d,\.]+', revenue_str)
-        if numbers:
-            num_str = numbers[0].replace(',', '.').replace(' ', '')
-            try:
-                num = float(num_str)
-                return int(num * 1_000_000)
-            except ValueError:
-                return None
+    if not revenue_clean or revenue_clean == '-':
+        return None
     
-    # Обработка миллиардов
-    if 'млрд' in revenue_str.lower() or 'billion' in revenue_str.lower():
-        numbers = re.findall(r'[\d,\.]+', revenue_str)
-        if numbers:
-            num_str = numbers[0].replace(',', '.').replace(' ', '')
-            try:
-                num = float(num_str)
-                return int(num * 1_000_000_000)
-            except ValueError:
-                return None
-    
-    # Извлекаем все цифры
-    digits = re.sub(r'[^\d]', '', revenue_str)
-    if digits:
-        try:
-            return int(digits)
-        except ValueError:
+    try:
+        revenue = int(revenue_clean)
+        # Если выручка отрицательная, возвращаем None
+        if revenue < 0:
             return None
-    
-    return None
+        return revenue
+    except ValueError:
+        return None
 
 
-def normalize_inn(inn_str: str) -> Optional[str]:
-    """Нормализует ИНН до строки из 10 или 12 цифр."""
+def normalize_inn(inn_str: Optional[str]) -> Optional[str]:
+    """Нормализует ИНН (удаляет пробелы, приводит к строке)"""
     if not inn_str:
         return None
     
-    # Извлекаем только цифры
-    digits = re.sub(r'[^\d]', '', str(inn_str))
-    
-    # ИНН должен быть 10 или 12 цифр
-    if len(digits) in [10, 12]:
-        return digits
-    
+    inn_clean = re.sub(r'[^\d]', '', str(inn_str))
+    if len(inn_clean) in [10, 12]:
+        return inn_clean
     return None
 
 
-def normalize_name(name: str) -> str:
-    """Нормализует название компании - удаляет лишние пробелы, обрезает."""
-    if not name:
-        return ""
+def normalize_employees(employees_str: Optional[str]) -> Optional[int]:
+    """Нормализует количество сотрудников"""
+    if not employees_str:
+        return None
     
-    # Удаляем лишние пробелы
-    name = re.sub(r'\s+', ' ', str(name))
-    return name.strip()
+    # Извлекаем первое число из строки
+    match = re.search(r'\d+', str(employees_str))
+    if match:
+        try:
+            return int(match.group())
+        except ValueError:
+            return None
+    return None
 
 
-def get_random_user_agent() -> str:
-    """Получает случайный User-Agent для запросов."""
-    try:
-        ua = UserAgent()
-        return ua.random
-    except:
-        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+def normalize_url(url: Optional[str]) -> Optional[str]:
+    """Нормализует URL"""
+    if not url:
+        return None
+    
+    url = str(url).strip()
+    if not url.startswith(('http://', 'https://')):
+        url = 'http://' + url
+    
+    return url
 
 
-def delay(seconds: float = 1.0):
-    """Добавляет задержку между запросами."""
-    time.sleep(seconds)
+def get_headers() -> dict:
+    """Возвращает заголовки для HTTP-запросов"""
+    return {
+        'User-Agent': ua.random,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+    }
 
 
+def sleep_random(min_seconds: float = 1.0, max_seconds: float = 3.0):
+    """Случайная задержка между запросами"""
+    import random
+    time.sleep(random.uniform(min_seconds, max_seconds))
 
